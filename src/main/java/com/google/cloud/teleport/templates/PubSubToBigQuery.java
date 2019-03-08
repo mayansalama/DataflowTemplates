@@ -35,6 +35,9 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.CreateDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.WriteDisposition;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryInsertError;
+import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
+import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessageWithAttributesCoder;
@@ -51,6 +54,9 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
+import org.joda.time.DateTimeZone;
+import org.joda.time.format.DateTimeFormat;
+import org.joda.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -120,6 +126,10 @@ public class PubSubToBigQuery {
 
   /** The tag for the dead-letter output of the json to table row transform. */
   public static final TupleTag<FailsafeElement<PubsubMessage, String>> TRANSFORM_DEADLETTER_OUT =
+      new TupleTag<FailsafeElement<PubsubMessage, String>>() {};
+
+  /** The tag for the dead-letter output of the write to BQ. */
+  public static final TupleTag<FailsafeElement<PubsubMessage, String>> WRITE_DEADLETTER_OUT =
       new TupleTag<FailsafeElement<PubsubMessage, String>>() {};
 
   /** The default suffix for error tables if dead letter table is not specified. */
@@ -208,7 +218,9 @@ public class PubSubToBigQuery {
     /*
      * Step #3: Write the successful records out to BigQuery
      */
-    transformOut
+
+    WriteResult writeResult = 
+        transformOut
         .get(TRANSFORM_OUT)
         .apply(
             "WriteSuccessfulRecords",
@@ -216,10 +228,12 @@ public class PubSubToBigQuery {
                 .withoutValidation()
                 .withCreateDisposition(CreateDisposition.CREATE_NEVER)
                 .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+                .withExtendedErrorInfo()
+                .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                 .to(options.getOutputTableSpec()));
 
     /*
-     * Step #4: Write failed records out to BigQuery
+     * Step #4: Write failed transform records out to Deadletter
      */
     PCollectionList.of(transformOut.get(UDF_DEADLETTER_OUT))
         .and(transformOut.get(TRANSFORM_DEADLETTER_OUT))
@@ -234,6 +248,20 @@ public class PubSubToBigQuery {
                         DEFAULT_DEADLETTER_TABLE_SUFFIX))
                 .setErrorRecordsTableSchema(ResourceUtils.getDeadletterTableSchemaJson())
                 .build());
+
+    /*
+    * Step #5: Write failed insert records to Deadletter
+    */
+    writeResult.getFailedInsertsWithErr()
+        .apply("FormatFailedInserts", ParDo.of(new FailedInsertFormatterFn()))
+        .apply(
+                "WriteFailedInsertsToDeadLetter",
+                BigQueryIO.writeTableRows()
+                    .to(options.getOutputDeadletterTable())
+                    .withJsonSchema(ResourceUtils.getDeadletterTableSchemaJson())
+                    .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
+                    .withWriteDisposition(WriteDisposition.WRITE_APPEND));
+
 
     return pipeline.run();
   }
@@ -341,6 +369,41 @@ public class PubSubToBigQuery {
       PubsubMessage message = context.element();
       context.output(
           FailsafeElement.of(message, new String(message.getPayload(), StandardCharsets.UTF_8)));
+    }
+  }
+
+  /**
+   * The {@link FailedInsertFormatterFn} converts a {@link BigQueryInsertError} into a
+   * {@link TableRow} that matches the DEADLETTER format used by {@link WritePubsubMessageErrors}.
+   * Note the {@link BigQueryInsertError} class does not retain PubSub attributes or the StackTrace so these will
+   * be null for these records
+   */
+  static class FailedInsertFormatterFn extends DoFn<BigQueryInsertError, TableRow> {
+    
+    /**
+    * The formatter used to convert timestamps into a BigQuery compatible <a
+    * href="https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#timestamp-type">format</a>.
+    */
+    private static final DateTimeFormatter TIMESTAMP_FORMATTER =
+        DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
+
+    @ProcessElement
+    public void processElement(ProcessContext context) {
+      BigQueryInsertError insertError = context.element();
+  
+      // Format the timestamp for insertion
+      String timestamp =
+        TIMESTAMP_FORMATTER.print(context.timestamp().toDateTime(DateTimeZone.UTC));
+  
+      // Build the table row
+      final TableRow failedRow =
+        new TableRow()
+          .set("timestamp", timestamp)
+          .set("errorMessage", insertError.getError().toString())
+          .set("payloadString", insertError.getRow().toString())
+          .set("payloadBytes", insertError.getRow().toString());
+      
+      context.output(failedRow);
     }
   }
 }
