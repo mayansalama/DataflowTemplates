@@ -255,13 +255,15 @@ public class PubSubToBigQuery {
     writeResult.getFailedInsertsWithErr()
         .apply("FormatFailedInserts", ParDo.of(new FailedInsertFormatterFn()))
         .apply(
-                "WriteFailedInsertsToDeadLetter",
+                "WriteFailedInserts",
                 BigQueryIO.writeTableRows()
-                    .to(options.getOutputDeadletterTable())
+                    .to(ValueProviderUtils.maybeUseDefaultDeadletterTable(
+                            options.getOutputDeadletterTable(),
+                            options.getOutputTableSpec(),
+                            DEFAULT_DEADLETTER_TABLE_SUFFIX))
                     .withJsonSchema(ResourceUtils.getDeadletterTableSchemaJson())
                     .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
                     .withWriteDisposition(WriteDisposition.WRITE_APPEND));
-
 
     return pipeline.run();
   }
@@ -382,7 +384,7 @@ public class PubSubToBigQuery {
     
     /**
     * The formatter used to convert timestamps into a BigQuery compatible <a
-    * href="https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#timestamp-type">format</a>.
+    * href="https://clolud.google.com/bigquery/docs/reference/standard-sql/data-types#timestamp-type">format</a>.
     */
     private static final DateTimeFormatter TIMESTAMP_FORMATTER =
         DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
