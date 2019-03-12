@@ -27,6 +27,8 @@ import com.google.cloud.teleport.util.DualInputNestedValueProvider.TranslatorInp
 import com.google.cloud.teleport.util.ResourceUtils;
 import com.google.cloud.teleport.util.ValueProviderUtils;
 import com.google.cloud.teleport.values.FailsafeElement;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import org.apache.beam.sdk.Pipeline;
@@ -38,6 +40,7 @@ import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.CreateDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.WriteDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryInsertError;
 import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
+import org.apache.beam.sdk.io.gcp.bigquery.TableRowJsonCoder;
 import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
@@ -201,7 +204,7 @@ public class PubSubToBigQuery {
      *     - Convert UDF result to TableRow objects
      *  3) Write successful records out to BigQuery
      *  4) Write failed transform records out to BigQuery
-     *  5) Write faield insert records out to BigQuery
+     *  5) Write failed insert records out to BigQuery
      */
     PCollectionTuple transformOut =
         pipeline
@@ -398,15 +401,24 @@ public class PubSubToBigQuery {
       // Format the timestamp for insertion
       String timestamp =
         TIMESTAMP_FORMATTER.print(context.timestamp().toDateTime(DateTimeZone.UTC));
+    
+      // Get row as JSON string
+      String jsonRow;
+      try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+        TableRowJsonCoder.of().encode(insertError.getRow(), outputStream);
+        jsonRow = outputStream.toString();
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to serialize table row to json " + 
+            insertError.toString(), e);
+      }
   
       // Build the table row
       final TableRow failedRow =
         new TableRow()
           .set("timestamp", timestamp)
           .set("errorMessage", insertError.getError().toString())
-          .set("payloadString", insertError.getRow().toString())
-          .set("payloadBytes", Base64.getEncoder().encode(
-                insertError.getRow().toString().getBytes()));
+          .set("payloadString", jsonRow)
+          .set("payloadBytes", Base64.getEncoder().encode(jsonRow.getBytes()));
       
       context.output(failedRow);
     }
