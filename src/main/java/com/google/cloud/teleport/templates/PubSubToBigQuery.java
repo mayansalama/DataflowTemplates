@@ -28,6 +28,7 @@ import com.google.cloud.teleport.util.ResourceUtils;
 import com.google.cloud.teleport.util.ValueProviderUtils;
 import com.google.cloud.teleport.values.FailsafeElement;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.CoderRegistry;
@@ -403,7 +404,8 @@ public class PubSubToBigQuery {
           .set("timestamp", timestamp)
           .set("errorMessage", insertError.getError().toString())
           .set("payloadString", insertError.getRow().toString())
-          .set("payloadBytes", insertError.getRow().toString());
+          .set("payloadBytes", Base64.getEncoder().encode(
+              insertError.getRow().toString().getBytes()));
       
       context.output(failedRow);
     }
