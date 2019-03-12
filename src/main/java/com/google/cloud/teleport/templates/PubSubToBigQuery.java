@@ -19,11 +19,9 @@ package com.google.cloud.teleport.templates;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.cloud.teleport.coders.FailsafeElementCoder;
 import com.google.cloud.teleport.templates.common.BigQueryConverters.FailsafeJsonToTableRow;
-import com.google.cloud.teleport.templates.common.ErrorConverters.WritePubsubMessageErrors;
+import com.google.cloud.teleport.templates.common.ErrorConverters.FailedPubsubMessageToTableRowFn;
 import com.google.cloud.teleport.templates.common.JavascriptTextTransformer.FailsafeJavascriptUdf;
 import com.google.cloud.teleport.templates.common.JavascriptTextTransformer.JavascriptTextTransformerOptions;
-import com.google.cloud.teleport.util.DualInputNestedValueProvider;
-import com.google.cloud.teleport.util.DualInputNestedValueProvider.TranslatorInput;
 import com.google.cloud.teleport.util.ResourceUtils;
 import com.google.cloud.teleport.util.ValueProviderUtils;
 import com.google.cloud.teleport.values.FailsafeElement;
@@ -53,7 +51,6 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -203,8 +200,9 @@ public class PubSubToBigQuery {
      *     - Transform message payload via UDF
      *     - Convert UDF result to TableRow objects
      *  3) Write successful records out to BigQuery
-     *  4) Write failed transform records out to BigQuery
-     *  5) Write failed insert records out to BigQuery
+     *  4) Convert failed transform records to Deadletter format
+     *  5) Convert failed insert records to Deadletter format
+     *  6) Write Deadletter records to BigQuery
      */
     PCollectionTuple transformOut =
         pipeline
@@ -238,27 +236,27 @@ public class PubSubToBigQuery {
                 .to(options.getOutputTableSpec()));
 
     /*
-     * Step #4: Write failed transform records out to Deadletter
+     * Step #4: Convert failed JSON/UDF conversions to Deadletter TableRow format
      */
-    PCollectionList.of(transformOut.get(UDF_DEADLETTER_OUT))
+    PCollection<TableRow> failedConverts = PCollectionList
+        .of(transformOut.get(UDF_DEADLETTER_OUT))
         .and(transformOut.get(TRANSFORM_DEADLETTER_OUT))
         .apply("Flatten", Flatten.pCollections())
-        .apply(
-            "WriteFailedRecords",
-            WritePubsubMessageErrors.newBuilder()
-                .setErrorRecordsTable(
-                    ValueProviderUtils.maybeUseDefaultDeadletterTable(
-                        options.getOutputDeadletterTable(),
-                        options.getOutputTableSpec(),
-                        DEFAULT_DEADLETTER_TABLE_SUFFIX))
-                .setErrorRecordsTableSchema(ResourceUtils.getDeadletterTableSchemaJson())
-                .build());
+        .apply("ConvertFailedConversions", ParDo.of(new FailedPubsubMessageToTableRowFn()));
 
     /*
-    * Step #5: Write failed insert records to Deadletter
+    * Step #5: Convert failed insert records to Deadletter TableRow format
     */
-    writeResult.getFailedInsertsWithErr()
-        .apply("FormatFailedInserts", ParDo.of(new FailedInsertFormatterFn()))
+    PCollection<TableRow> failedInserts = writeResult
+        .getFailedInsertsWithErr()
+        .apply("FormatFailedInserts", ParDo.of(new FailedInsertFormatterFn()));
+    
+    /*
+    * Step #6: Write failed records to Deadletter table
+    */
+    PCollectionList.of(failedConverts)
+        .and(failedInserts)
+        .apply("Flatten", Flatten.pCollections())
         .apply(
                 "WriteFailedInserts",
                 BigQueryIO.writeTableRows()
@@ -271,30 +269,6 @@ public class PubSubToBigQuery {
                     .withWriteDisposition(WriteDisposition.WRITE_APPEND));
 
     return pipeline.run();
-  }
-
-  /**
-   * If deadletterTable is available, it is returned as is, otherwise outputTableSpec +
-   * defaultDeadLetterTableSuffix is returned instead.
-   */
-  private static ValueProvider<String> maybeUseDefaultDeadletterTable(
-      ValueProvider<String> deadletterTable,
-      ValueProvider<String> outputTableSpec,
-      String defaultDeadLetterTableSuffix) {
-    return DualInputNestedValueProvider.of(
-        deadletterTable,
-        outputTableSpec,
-        new SerializableFunction<TranslatorInput<String, String>, String>() {
-          @Override
-          public String apply(TranslatorInput<String, String> input) {
-            String userProvidedTable = input.getX();
-            String outputTableSpec = input.getY();
-            if (userProvidedTable == null) {
-              return outputTableSpec + defaultDeadLetterTableSuffix;
-            }
-            return userProvidedTable;
-          }
-        });
   }
 
   /**
