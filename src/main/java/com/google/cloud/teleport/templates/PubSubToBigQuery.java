@@ -200,7 +200,8 @@ public class PubSubToBigQuery {
      *     - Transform message payload via UDF
      *     - Convert UDF result to TableRow objects
      *  3) Write successful records out to BigQuery
-     *  4) Write failed records out to BigQuery
+     *  4) Write failed transform records out to BigQuery
+     *  5) Write faield insert records out to BigQuery
      */
     PCollectionTuple transformOut =
         pipeline
@@ -405,7 +406,7 @@ public class PubSubToBigQuery {
           .set("errorMessage", insertError.getError().toString())
           .set("payloadString", insertError.getRow().toString())
           .set("payloadBytes", Base64.getEncoder().encode(
-              insertError.getRow().toString().getBytes()));
+                insertError.getRow().toString().getBytes()));
       
       context.output(failedRow);
     }
