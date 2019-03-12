@@ -241,7 +241,7 @@ public class PubSubToBigQuery {
     PCollection<TableRow> failedConverts = PCollectionList
         .of(transformOut.get(UDF_DEADLETTER_OUT))
         .and(transformOut.get(TRANSFORM_DEADLETTER_OUT))
-        .apply("Flatten", Flatten.pCollections())
+        .apply("FlattenConversionFailures", Flatten.pCollections())
         .apply("ConvertFailedConversions", ParDo.of(new FailedPubsubMessageToTableRowFn()));
 
     /*
@@ -256,7 +256,7 @@ public class PubSubToBigQuery {
     */
     PCollectionList.of(failedConverts)
         .and(failedInserts)
-        .apply("Flatten", Flatten.pCollections())
+        .apply("FlattenAllFailures", Flatten.pCollections())
         .apply(
                 "WriteFailedInserts",
                 BigQueryIO.writeTableRows()
