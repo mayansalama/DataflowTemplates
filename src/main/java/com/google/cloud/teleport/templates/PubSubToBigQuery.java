@@ -380,25 +380,24 @@ public class PubSubToBigQuery {
       String jsonRow;
       try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
         TableRowJsonCoder.of().encode(insertError.getRow(), outputStream);
-        LOG.info("Got convert row " + outputStream.toString());
-        jsonRow = outputStream.toString();
+        jsonRow = outputStream.toString("UTF-8");
       } catch (IOException e) {
         throw new RuntimeException("Failed to serialize table row to json " + 
             insertError.toString(), e);
       }
 
       // Build Table row
-      String insertString;
+      String insertErrorString;
       try {
-        insertString = insertError.getError().toPrettyString();
+        insertErrorString = insertError.getError().toPrettyString();
       } catch (Exception e) {
-        insertString = insertError.getError().toString();
+        insertErrorString = insertError.getError().toString();
       }
       final TableRow failedRow = 
         new TableRow()
             .set("timestamp", timestamp)
             .set("errorMessage", "Failed to insert table row to BigQuery")
-            .set("stacktrace", insertString)
+            .set("stacktrace", insertErrorString)
             .set("payloadString", jsonRow)
             .set("payloadBytes", Base64.getEncoder().encode(jsonRow.getBytes()));
       
